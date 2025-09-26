@@ -8,6 +8,7 @@ import asyncio
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import time
+from datetime import datetime, timedelta
 
 # Disable ChromaDB telemetry before importing to prevent errors
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -553,6 +554,172 @@ async def semantic_search(
 
     # Return results as a single formatted string
     return "\n\n---\n\n".join(formatted_results) if formatted_results else "No results found."
+
+
+@mcp.tool
+async def temporal_search(
+    since_date: Optional[str] = None,
+    until_date: Optional[str] = None,
+    query: Optional[str] = None,
+    vault_filter: Optional[str] = None,
+    limit: int = 10
+) -> str:
+    """
+    Search Obsidian vault notes based on modification dates with optional semantic search.
+
+    Args:
+        since_date: Start date in YYYY-MM-DD format (inclusive)
+        until_date: End date in YYYY-MM-DD format (inclusive)
+        query: Optional semantic search query to filter results within date range
+        vault_filter: Optional filter results to a specific vault name
+        limit: Maximum number of results to return (default: 10, max: 20)
+
+    Examples:
+        - Find recently modified notes: since_date="2024-01-01"
+        - Find notes from a specific period: since_date="2024-01-01", until_date="2024-01-31"
+        - Find notes about "LSM trees" modified this month: query="LSM trees", since_date="2024-01-01"
+    """
+    global chroma_collection
+
+    if not chroma_collection:
+        return "Vector store not initialized. Please restart the server."
+
+    # Cap limit at 20
+    limit = min(limit, 20)
+
+    # Parse dates and convert to timestamps
+    since_timestamp = None
+    until_timestamp = None
+
+    try:
+        if since_date:
+            since_dt = datetime.strptime(since_date, "%Y-%m-%d")
+            since_timestamp = int(since_dt.timestamp())
+
+        if until_date:
+            # Add 23:59:59 to include the entire day
+            until_dt = datetime.strptime(until_date, "%Y-%m-%d") + timedelta(days=1) - timedelta(seconds=1)
+            until_timestamp = int(until_dt.timestamp())
+    except ValueError as e:
+        return f"Invalid date format. Please use YYYY-MM-DD. Error: {e}"
+
+    # Build where clause
+    where_conditions = []
+
+    # Add date range filters
+    if since_timestamp and until_timestamp:
+        where_conditions.append({'modified': {'$gte': since_timestamp}})
+        where_conditions.append({'modified': {'$lte': until_timestamp}})
+    elif since_timestamp:
+        where_conditions.append({'modified': {'$gte': since_timestamp}})
+    elif until_timestamp:
+        where_conditions.append({'modified': {'$lte': until_timestamp}})
+
+    # Add vault filter if specified
+    if vault_filter:
+        where_conditions.append({'vault': vault_filter})
+
+    # Combine conditions
+    where_clause = None
+    if len(where_conditions) > 1:
+        where_clause = {'$and': where_conditions}
+    elif where_conditions:
+        where_clause = where_conditions[0]
+
+    # Execute query
+    if query:
+        # Semantic search within date range
+        results = chroma_collection.query(
+            query_texts=[query],
+            n_results=limit,
+            where=where_clause
+        )
+    else:
+        # Get all documents in date range (no semantic search)
+        results = chroma_collection.get(
+            limit=limit,
+            where=where_clause,
+            include=['documents', 'metadatas']
+        )
+        # Restructure to match query() format
+        if results['documents']:
+            results = {
+                'documents': [results['documents']],
+                'metadatas': [results['metadatas']],
+                'distances': [[None] * len(results['documents'])]  # No distances for get()
+            }
+        else:
+            results = {'documents': [[]], 'metadatas': [[]], 'distances': [[]]}
+
+    # Format the results with enhanced date information
+    formatted_results = []
+    now = datetime.now()
+
+    if results["documents"] and results["documents"][0]:
+        # Sort by modification time (most recent first)
+        docs_with_metadata = []
+        for i, doc in enumerate(results["documents"][0]):
+            metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+            distance = results["distances"][0][i] if results["distances"] and results["distances"][0] else None
+            docs_with_metadata.append((doc, metadata, distance))
+
+        # Sort by modified timestamp (most recent first)
+        docs_with_metadata.sort(key=lambda x: x[1].get('modified', 0), reverse=True)
+
+        for doc, metadata, distance in docs_with_metadata:
+            # Format modification date
+            modified_timestamp = metadata.get('modified', 0)
+            if modified_timestamp:
+                modified_dt = datetime.fromtimestamp(modified_timestamp)
+                modified_str = modified_dt.strftime("%Y-%m-%d %H:%M")
+
+                # Calculate relative time
+                time_diff = now - modified_dt
+                if time_diff.days == 0:
+                    if time_diff.seconds < 3600:
+                        relative_time = f"{time_diff.seconds // 60} minutes ago"
+                    else:
+                        relative_time = f"{time_diff.seconds // 3600} hours ago"
+                elif time_diff.days == 1:
+                    relative_time = "Yesterday"
+                elif time_diff.days < 7:
+                    relative_time = f"{time_diff.days} days ago"
+                elif time_diff.days < 30:
+                    relative_time = f"{time_diff.days // 7} weeks ago"
+                else:
+                    relative_time = f"{time_diff.days // 30} months ago"
+            else:
+                modified_str = "Unknown"
+                relative_time = ""
+
+            result_text = (
+                f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
+                f"Modified: {modified_str} ({relative_time})\n"
+                f"Source: {metadata.get('source', 'Unknown')}\n"
+                f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
+            )
+
+            if distance is not None:
+                result_text += f"Score: {1 - distance}\n"
+
+            result_text += f"\n{doc[:500]}{'...' if len(doc) > 500 else ''}"
+            formatted_results.append(result_text)
+
+    if not formatted_results:
+        date_desc = []
+        if since_date:
+            date_desc.append(f"since {since_date}")
+        if until_date:
+            date_desc.append(f"until {until_date}")
+        date_str = " and ".join(date_desc) if date_desc else ""
+
+        if query:
+            return f"No results found for '{query}' {date_str}.".strip()
+        else:
+            return f"No documents found {date_str}.".strip() if date_str else "No documents found."
+
+    # Return results as a single formatted string
+    return "\n\n---\n\n".join(formatted_results)
 
 
 class VaultChangeHandler(FileSystemEventHandler):
