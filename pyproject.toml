@@ -5,9 +5,9 @@ description = "MCP server for Obsidian vault search"
 requires-python = ">=3.10"
 dependencies = [
     "questionary>=2.1.1",
-    "chromadb>=0.5.23",
-    "langchain-text-splitters>=0.3.4",
-    "fastmcp>=2.10.0",
+    "chromadb>=1.1.0",
+    "langchain-text-splitters>=0.3.11",
+    "fastmcp>=2.11.3",
     "pydantic>=2.0.0",
     "watchdog>=6.0.0",
 ]
