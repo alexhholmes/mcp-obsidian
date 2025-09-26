@@ -23,8 +23,28 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 
+# Configuration paths
 CONFIG_DIR = Path.home() / ".mcp-obsidian"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+# ChromaDB settings
+CHROMA_DB_DIR = "chroma_db"
+CHROMA_COLLECTION_NAME = "obsidian_notes"
+CHROMA_COLLECTION_DESC = "Obsidian vault notes"
+
+# Text chunking settings
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+CHUNK_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+
+# Search settings
+DEFAULT_SEARCH_LIMIT = 10
+MAX_SEARCH_LIMIT = 20
+PREVIEW_LENGTH = 500
+
+# File monitoring settings
+MONITOR_UPDATE_INTERVAL = 10  # seconds
+MONITOR_DEBOUNCE_SECONDS = 30  # seconds
 
 # Create FastMCP server instance
 mcp = FastMCP("mcp-obsidian")
@@ -374,9 +394,9 @@ def chunk_markdown_content(file_path: Path, vault_path: Path, vault_name: str) -
 
         # Create text splitter for markdown
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", ". ", " ", ""],
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            separators=CHUNK_SEPARATORS,
             keep_separator=False
         )
 
@@ -497,7 +517,7 @@ def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chroma
     os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
     # Initialize ChromaDB with persistent storage
-    db_path = CONFIG_DIR / "chroma_db"
+    db_path = CONFIG_DIR / CHROMA_DB_DIR
     db_path.mkdir(parents=True, exist_ok=True)
 
     client = chromadb.PersistentClient(
@@ -510,8 +530,8 @@ def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chroma
 
     # Get or create collection (don't delete existing)
     collection = client.get_or_create_collection(
-        name="obsidian_notes",
-        metadata={"description": "Obsidian vault notes"}
+        name=CHROMA_COLLECTION_NAME,
+        metadata={"description": CHROMA_COLLECTION_DESC}
     )
 
     print(f"📚 Checking {len(vaults)} vault(s) for updates...", file=sys.stderr)
@@ -594,7 +614,7 @@ def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chroma
 async def semantic_search(
     query: str,
     vault_filter: Optional[str] = None,
-    limit: int = 10
+    limit: int = DEFAULT_SEARCH_LIMIT
 ) -> str:
     """
     Search Obsidian vault notes using semantic similarity.
@@ -609,8 +629,8 @@ async def semantic_search(
     if not chroma_collection:
         return "Vector store not initialized. Please restart the server."
 
-    # Cap limit at 20
-    limit = min(limit, 20)
+    # Cap limit at max
+    limit = min(limit, MAX_SEARCH_LIMIT)
 
     # Build where clause for filtering
     where_clause = None
@@ -636,7 +656,7 @@ async def semantic_search(
                 f"Source: {metadata.get('source', 'Unknown')}\n"
                 f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
                 f"Score: {1 - distance if distance else 'N/A'}\n\n"
-                f"{doc[:500]}{'...' if len(doc) > 500 else ''}"
+                f"{doc[:PREVIEW_LENGTH]}{'...' if len(doc) > PREVIEW_LENGTH else ''}"
             )
             formatted_results.append(result_text)
 
@@ -653,7 +673,7 @@ async def temporal_search(
     until_date: Optional[str] = None,
     query: Optional[str] = None,
     vault_filter: Optional[str] = None,
-    limit: int = 10
+    limit: int = DEFAULT_SEARCH_LIMIT
 ) -> str:
     """
     Search Obsidian vault notes based on modification dates with optional semantic search.
@@ -675,8 +695,8 @@ async def temporal_search(
     if not chroma_collection:
         return "Vector store not initialized. Please restart the server."
 
-    # Cap limit at 20
-    limit = min(limit, 20)
+    # Cap limit at max
+    limit = min(limit, MAX_SEARCH_LIMIT)
 
     # Parse dates and convert to timestamps
     since_timestamp = None
@@ -793,7 +813,7 @@ async def temporal_search(
             if distance is not None:
                 result_text += f"Score: {1 - distance}\n"
 
-            result_text += f"\n{doc[:500]}{'...' if len(doc) > 500 else ''}"
+            result_text += f"\n{doc[:PREVIEW_LENGTH]}{'...' if len(doc) > PREVIEW_LENGTH else ''}"
             formatted_results.append(result_text)
 
     if not formatted_results:
@@ -872,7 +892,7 @@ class VaultChangeHandler(FileSystemEventHandler):
         self.update_callback = update_callback
         self.last_update = 0
         self.pending_update = False
-        self.debounce_seconds = 30  # Wait 30 seconds after last change before updating
+        self.debounce_seconds = MONITOR_DEBOUNCE_SECONDS
 
     def on_any_event(self, event: FileSystemEvent):
         """Handle any file system event"""
@@ -894,7 +914,7 @@ class VaultChangeHandler(FileSystemEventHandler):
         print(f"\n📝 Detected {event_type}: {file_name}", file=sys.stderr)
 
 
-async def monitor_vaults(vaults: List[Dict], update_interval: int = 10):
+async def monitor_vaults(vaults: List[Dict], update_interval: int = MONITOR_UPDATE_INTERVAL):
     """Monitor vaults for changes and trigger re-indexing"""
     global chroma_client, chroma_collection
 
