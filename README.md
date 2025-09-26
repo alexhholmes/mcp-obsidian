@@ -149,4 +149,4 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT License
