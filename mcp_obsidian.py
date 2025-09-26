@@ -898,6 +898,38 @@ def serve():
     mcp.run()
 
 
+def index_vaults():
+    """Rebuild search index for all configured vaults"""
+    global chroma_client, chroma_collection
+
+    config = load_config()
+    vaults = config.get("vaults", [])
+
+    if not vaults:
+        print("No vaults configured. Run 'mcp-obsidian configure' first.", file=sys.stderr)
+        sys.exit(1)
+
+    print("🔄 Rebuilding search index for all configured vaults...", file=sys.stderr)
+    print(f"Found {len(vaults)} vault(s) to index.\n", file=sys.stderr)
+
+    # Initialize vector store (this will rebuild the entire index)
+    chroma_client, chroma_collection = initialize_vector_store(vaults)
+
+    # Show results
+    if chroma_collection:
+        doc_count = chroma_collection.count()
+        print(f"\n✅ Index rebuilt successfully!", file=sys.stderr)
+        print(f"📊 Total documents indexed: {doc_count}", file=sys.stderr)
+
+        # Show vaults that were indexed
+        print("\n📁 Vaults indexed:", file=sys.stderr)
+        for vault in vaults:
+            print(f"   - {vault['name']} ({vault['path']})", file=sys.stderr)
+    else:
+        print("❌ Failed to rebuild index.", file=sys.stderr)
+        sys.exit(1)
+
+
 def load_config():
     """Load configuration"""
     if not CONFIG_FILE.exists():
@@ -915,11 +947,16 @@ def main():
     # Configure subcommand
     subparsers.add_parser("configure", help="Configure vault paths")
 
+    # Index subcommand
+    subparsers.add_parser("index", help="Rebuild search index for all configured vaults")
+
     # Parse arguments
     args = parser.parse_args()
 
     if args.command == "configure":
         configure()
+    elif args.command == "index":
+        index_vaults()
     else:
         # Default to server mode
         serve()
