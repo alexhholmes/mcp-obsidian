@@ -30,6 +30,15 @@ pip install uv
 
 ### Install mcp-obsidian
 
+#### Option 1: Install as a uv tool (Recommended)
+
+```bash
+uv tool install "git+https://github.com/alexhholmes/mcp-obsidian.git"
+mcp-obsidian configure  # Configure your vaults
+```
+
+#### Option 2: Install from source
+
 1. Clone the repository:
 ```bash
 git clone https://github.com/yourusername/mcp-obsidian.git
