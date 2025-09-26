@@ -5,10 +5,13 @@ embedded ChromaDB vector storage.
 
 ## Features
 
-- 🔍 Semantic search across your Obsidian vaults using vector embeddings
+- 🔍 **Semantic search** across your Obsidian vaults using vector embeddings
+- 📅 **Temporal search** to find notes by modification date with optional semantic filtering
 - 📁 Support for multiple vault configurations
-- 🔄 Real-time file watching and automatic index updates
-- 🚀 Fast search with ChromaDB backend
+- 🔄 **Real-time monitoring** with automatic re-indexing after file change
+- 🔁 **Manual re-indexing** on demand via the `reindex_vaults` tool
+- 🚀 Fast, incremental updates with ChromaDB backend
+- 🔒 Thread-safe operations for concurrent access
 - 🔧 Works as both MCP server and CLI tool
 
 ## Prerequisites
