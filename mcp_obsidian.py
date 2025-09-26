@@ -188,6 +188,90 @@ def remove_vault_path():
         print("Removal cancelled.", file=sys.stderr)
 
 
+def configure_claude_desktop():
+    """Configure Claude Desktop to use mcp-obsidian"""
+    import platform
+
+    # Determine the Claude Desktop config path based on platform
+    system = platform.system()
+    if system == "Darwin":  # macOS
+        claude_config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    elif system == "Windows":
+        claude_config_path = Path.home() / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
+    else:  # Linux
+        claude_config_path = Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+    print("🤖 Configuring Claude Desktop for mcp-obsidian\n", file=sys.stderr)
+
+    # Check if Claude config file exists
+    if not claude_config_path.exists():
+        print(f"📝 Creating Claude Desktop configuration at:\n   {claude_config_path}\n", file=sys.stderr)
+        claude_config_path.parent.mkdir(parents=True, exist_ok=True)
+        claude_config = {}
+    else:
+        print(f"📝 Found Claude Desktop configuration at:\n   {claude_config_path}\n", file=sys.stderr)
+        try:
+            with open(claude_config_path, 'r') as f:
+                claude_config = json.load(f)
+        except json.JSONDecodeError:
+            print("⚠️  Existing configuration is invalid. Creating new configuration.\n", file=sys.stderr)
+            claude_config = {}
+
+    # Ensure mcpServers section exists
+    if "mcpServers" not in claude_config:
+        claude_config["mcpServers"] = {}
+
+    # Check if obsidian is already configured
+    if "obsidian" in claude_config["mcpServers"]:
+        existing = claude_config["mcpServers"]["obsidian"]
+        print("⚠️  MCP Obsidian is already configured in Claude Desktop:", file=sys.stderr)
+        print(f"   Command: {existing.get('command', 'Not set')}", file=sys.stderr)
+
+        if not questionary.confirm(
+            "\nDo you want to update the existing configuration?",
+            default=True,
+            style=custom_style
+        ).ask():
+            print("Configuration cancelled.", file=sys.stderr)
+            return
+
+    # Add or update the obsidian configuration
+    claude_config["mcpServers"]["obsidian"] = {
+        "command": "mcp-obsidian"
+    }
+
+    # Save the updated configuration
+    try:
+        with open(claude_config_path, 'w') as f:
+            json.dump(claude_config, f, indent=2)
+
+        print("\n✅ Claude Desktop configuration updated successfully!", file=sys.stderr)
+        print("\n📋 Configuration added:", file=sys.stderr)
+        print('   "obsidian": {', file=sys.stderr)
+        print('     "command": "mcp-obsidian"', file=sys.stderr)
+        print('   }', file=sys.stderr)
+        print("\n🔄 Please restart Claude Desktop for the changes to take effect.", file=sys.stderr)
+
+        # Check if vaults are configured
+        config = load_config()
+        vaults = config.get("vaults", [])
+        if not vaults:
+            print("\n⚠️  No vaults configured yet!", file=sys.stderr)
+            print("   Run 'mcp-obsidian configure' and select 'Add Vault Path' to add your Obsidian vaults.", file=sys.stderr)
+
+    except Exception as e:
+        print(f"❌ Failed to update Claude Desktop configuration: {e}", file=sys.stderr)
+        print("\nYou can manually add the following to your Claude Desktop configuration:", file=sys.stderr)
+        print(f"File: {claude_config_path}", file=sys.stderr)
+        print('\n{', file=sys.stderr)
+        print('  "mcpServers": {', file=sys.stderr)
+        print('    "obsidian": {', file=sys.stderr)
+        print('      "command": "mcp-obsidian"', file=sys.stderr)
+        print('    }', file=sys.stderr)
+        print('  }', file=sys.stderr)
+        print('}', file=sys.stderr)
+
+
 def save_config(vaults):
     """Save the configuration to file"""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -215,7 +299,8 @@ def configure():
                     {"name": "Add Vault Path", "value": "1", "shortcut_key": "1"},
                     {"name": "List Vault Paths", "value": "2", "shortcut_key": "2"},
                     {"name": "Remove Vault Path", "value": "3", "shortcut_key": "3"},
-                    {"name": "Exit (^C)", "value": "4", "shortcut_key": "4"}
+                    {"name": "Configure Claude Desktop", "value": "4", "shortcut_key": "4"},
+                    {"name": "Exit (^C)", "value": "5", "shortcut_key": "5"}
                 ],
                 style=custom_style,
                 use_shortcuts=True,
@@ -232,7 +317,9 @@ def configure():
             list_vault_paths()
         elif choice == "3":
             remove_vault_path()
-        elif choice == "4" or choice is None:
+        elif choice == "4":
+            configure_claude_desktop()
+        elif choice == "5" or choice is None:
             break
 
         print(file=sys.stderr)  # Add spacing between operations

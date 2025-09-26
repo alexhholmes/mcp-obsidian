@@ -157,6 +157,12 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 }
 ```
 
+or alternatively use to configuration tool to set it up automatically:
+
+```bash
+mcp-obsidian configure
+```
+
 ## How It Works
 
 1. **Indexing**: The server reads all markdown files from configured vaults and creates vector embeddings using ChromaDB
