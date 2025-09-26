@@ -1,7 +1,8 @@
 # mcp-obsidian
 
 An MCP (Model Context Protocol) server for semantic search in Obsidian vaults using 
-embedded ChromaDB vector storage.
+embedded ChromaDB vector storage. I intend on keeping this fairly minimal to keep usage
+with Claude simple.
 
 ## Features
 
@@ -105,8 +106,22 @@ mcp-obsidian
 ```
 
 The server exposes the following tools:
-- `search_notes`: Search across all configured vaults with semantic matching
-- `search_vault`: Search within a specific vault
+- `semantic_search`: Search across all configured vaults using semantic similarity with optional vault filtering
+- `temporal_search`: Search notes by modification date with optional semantic filtering
+- `reindex_vaults`: Manually trigger a re-index of all configured Obsidian vaults
+
+The vectors are stored along with the following metadata, which can be used for
+filtering searches:
+
+- `vault`: The name of the vault containing the document
+- `title`: The filename without extension
+- `source`: The relative path from the vault root
+- `modified`: Unix timestamp of the file's last modification time
+- `file_path`: The absolute path to the source file
+- `start_line` / `end_line`: Line numbers for the chunk within the original document
+- `chunk_index` / `total_chunks`: Position of this chunk within the document
+- `file_hash`: MD5 hash of the file content for change detection
+
 
 ### CLI Usage
 
