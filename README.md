@@ -25,13 +25,6 @@ with Claude simple.
 ### Install uv (if not already installed)
 
 ```bash
-# macOS/Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# Or with pip
 pip install uv
 ```
 
