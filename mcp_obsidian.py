@@ -6,7 +6,8 @@ import hashlib
 import os
 import asyncio
 from pathlib import Path
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Optional
+import time
 
 # Disable ChromaDB telemetry before importing to prevent errors
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -16,15 +17,16 @@ from questionary import Style
 import chromadb
 from chromadb.config import Settings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+from fastmcp import FastMCP
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 
 CONFIG_DIR = Path.home() / ".mcp-obsidian"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Create FastMCP server instance
-server = Server("mcp-obsidian")
+mcp = FastMCP("mcp-obsidian")
 
 # Global ChromaDB client and collection
 chroma_client: Optional[chromadb.Client] = None
@@ -496,90 +498,143 @@ def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chroma
     return client, collection
 
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available tools for the MCP server."""
-    return [
-        Tool(
-            name="semantic_search",
-            description="Search Obsidian vault notes using semantic similarity",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query to find similar content"
-                    },
-                    "vault_filter": {
-                        "type": "string",
-                        "description": "Optional: Filter results to a specific vault name"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (default: 10, max: 20)",
-                        "default": 10,
-                        "maximum": 20
-                    }
-                },
-                "required": ["query"]
-            }
-        )
-    ]
+@mcp.tool
+async def semantic_search(
+    query: str,
+    vault_filter: Optional[str] = None,
+    limit: int = 10
+) -> str:
+    """
+    Search Obsidian vault notes using semantic similarity.
 
-
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Execute a tool and return results."""
+    Args:
+        query: The search query to find similar content
+        vault_filter: Optional filter results to a specific vault name
+        limit: Maximum number of results to return (default: 10, max: 20)
+    """
     global chroma_collection
 
     if not chroma_collection:
-        return [TextContent(
-            type="text",
-            text="Vector store not initialized. Please restart the server."
-        )]
+        return "Vector store not initialized. Please restart the server."
 
-    if name == "semantic_search":
-        query = arguments.get("query", "")
-        vault_filter = arguments.get("vault_filter")
-        limit = min(arguments.get("limit", 10), 20)  # Default 10, cap at 20
+    # Cap limit at 20
+    limit = min(limit, 20)
 
-        # Build where clause for filtering
-        where_clause = None
-        if vault_filter:
-            where_clause = {"vault": vault_filter}
+    # Build where clause for filtering
+    where_clause = None
+    if vault_filter:
+        where_clause = {"vault": vault_filter}
 
-        # Query the collection
-        results = chroma_collection.query(
-            query_texts=[query],
-            n_results=limit,
-            where=where_clause
-        )
+    # Query the collection
+    results = chroma_collection.query(
+        query_texts=[query],
+        n_results=limit,
+        where=where_clause
+    )
 
-        # Format the results
-        formatted_results = []
-        if results["documents"] and results["documents"][0]:
-            for i, doc in enumerate(results["documents"][0]):
-                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-                distance = results["distances"][0][i] if results["distances"] else None
+    # Format the results
+    formatted_results = []
+    if results["documents"] and results["documents"][0]:
+        for i, doc in enumerate(results["documents"][0]):
+            metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+            distance = results["distances"][0][i] if results["distances"] else None
 
-                result_text = (
-                    f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
-                    f"Source: {metadata.get('source', 'Unknown')}\n"
-                    f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
-                    f"Score: {1 - distance if distance else 'N/A'}\n\n"
-                    f"{doc[:500]}{'...' if len(doc) > 500 else ''}"
-                )
-                formatted_results.append(TextContent(type="text", text=result_text))
+            result_text = (
+                f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
+                f"Source: {metadata.get('source', 'Unknown')}\n"
+                f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
+                f"Score: {1 - distance if distance else 'N/A'}\n\n"
+                f"{doc[:500]}{'...' if len(doc) > 500 else ''}"
+            )
+            formatted_results.append(result_text)
 
-        if not formatted_results:
-            return [TextContent(type="text", text="No results found for your query.")]
+    if not formatted_results:
+        return "No results found for your query."
 
-        return formatted_results
-
-    return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    # Return results as a single formatted string
+    return "\n\n---\n\n".join(formatted_results) if formatted_results else "No results found."
 
 
-async def serve():
+class VaultChangeHandler(FileSystemEventHandler):
+    """Handle file system changes in Obsidian vaults"""
+
+    def __init__(self, vaults: List[Dict], update_callback):
+        self.vaults = vaults
+        self.update_callback = update_callback
+        self.last_update = 0
+        self.pending_update = False
+        self.debounce_seconds = 30  # Wait 30 seconds after last change before updating
+
+    def on_any_event(self, event: FileSystemEvent):
+        """Handle any file system event"""
+        # Only care about markdown files
+        if not event.src_path.endswith('.md'):
+            return
+
+        # Skip hidden files/directories
+        if any(part.startswith('.') for part in Path(event.src_path).parts):
+            return
+
+        # Mark that we have a pending update
+        self.pending_update = True
+        self.last_update = time.time()
+
+        # Log the change
+        event_type = event.event_type
+        file_name = Path(event.src_path).name
+        print(f"\n📝 Detected {event_type}: {file_name}", file=sys.stderr)
+
+
+async def monitor_vaults(vaults: List[Dict], update_interval: int = 10):
+    """Monitor vaults for changes and trigger re-indexing"""
+    global chroma_client, chroma_collection
+
+    # Create file system event handler
+    handler = VaultChangeHandler(vaults, lambda: initialize_vector_store(vaults))
+
+    # Set up observers for each vault
+    observers = []
+    for vault in vaults:
+        vault_path = Path(vault["path"])
+        if vault_path.exists():
+            observer = Observer()
+            observer.schedule(handler, str(vault_path), recursive=True)
+            observer.start()
+            observers.append(observer)
+            print(f"👁️  Monitoring vault: {vault['name']}", file=sys.stderr)
+
+    try:
+        while True:
+            await asyncio.sleep(update_interval)
+
+            # Check if we have pending updates and enough time has passed
+            if handler.pending_update:
+                time_since_last = time.time() - handler.last_update
+                if time_since_last >= handler.debounce_seconds:
+                    print(f"\n🔄 Re-indexing vaults after changes...", file=sys.stderr)
+                    handler.pending_update = False
+
+                    # Run the update in a thread to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    new_client, new_collection = await loop.run_in_executor(
+                        None, initialize_vector_store, vaults
+                    )
+
+                    # Update global references
+                    chroma_client = new_client
+                    chroma_collection = new_collection
+
+                    print("✅ Re-indexing complete! Ready for queries.", file=sys.stderr)
+
+    except asyncio.CancelledError:
+        # Clean shutdown
+        for observer in observers:
+            observer.stop()
+            observer.join()
+        raise
+
+
+def serve():
     """Run the MCP server."""
     global chroma_client, chroma_collection
 
@@ -598,15 +653,26 @@ async def serve():
     print("\n📡 MCP server ready!", file=sys.stderr)
     print("Vector store initialized and ready for queries.", file=sys.stderr)
 
-    # Run the FastMCP server
-    from mcp.server.stdio import stdio_server
+    # Start the file system monitor in a background thread
+    # Since FastMCP doesn't support startup/shutdown hooks, we'll use a simpler approach
+    import threading
 
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    def start_monitor():
+        """Start monitoring in a separate thread"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(monitor_vaults(vaults))
+        except KeyboardInterrupt:
+            pass
+
+    # Start monitoring in a background thread
+    monitor_thread = threading.Thread(target=start_monitor, daemon=True)
+    monitor_thread.start()
+    print("👁️  File system monitoring started", file=sys.stderr)
+
+    # Run the FastMCP server (it handles its own event loop)
+    mcp.run()
 
 
 def load_config():
@@ -633,7 +699,7 @@ def main():
         configure()
     else:
         # Default to server mode
-        asyncio.run(serve())
+        serve()
 
 
 if __name__ == "__main__":
