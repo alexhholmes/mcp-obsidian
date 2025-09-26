@@ -33,6 +33,10 @@ mcp = FastMCP("mcp-obsidian")
 chroma_client: Optional[chromadb.Client] = None
 chroma_collection: Optional[chromadb.Collection] = None
 
+# Lock for updating global ChromaDB references atomically
+import threading
+chroma_ref_lock = threading.Lock()
+
 custom_style = Style([
     ('qmark', 'fg:#673ab7 bold'),
     ('question', 'bold'),
@@ -579,7 +583,7 @@ async def temporal_search(
         - Find notes from a specific period: since_date="2024-01-01", until_date="2024-01-31"
         - Find notes about "LSM trees" modified this month: query="LSM trees", since_date="2024-01-01"
     """
-    global chroma_collection
+
 
     if not chroma_collection:
         return "Vector store not initialized. Please restart the server."
@@ -722,6 +726,57 @@ async def temporal_search(
     return "\n\n---\n\n".join(formatted_results)
 
 
+@mcp.tool
+async def reindex_vaults() -> str:
+    """
+    Manually trigger a re-index of all configured Obsidian vaults.
+
+    This will:
+    - Check all configured vaults for new, modified, or deleted files
+    - Update the vector database with any changes
+    - Return a summary of the indexing operation
+    """
+    global chroma_client, chroma_collection
+
+    config = load_config()
+    vaults = config.get("vaults", [])
+
+    if not vaults:
+        return "No vaults configured. Please configure vaults first using 'mcp-obsidian configure'."
+
+    try:
+        # Run re-indexing
+        start_time = time.time()
+
+        # Run the update in a thread to avoid blocking the async context
+        loop = asyncio.get_event_loop()
+        new_client, new_collection = await loop.run_in_executor(
+            None, initialize_vector_store, vaults
+        )
+
+        # Update global references atomically
+        with chroma_ref_lock:
+            chroma_client = new_client
+            chroma_collection = new_collection
+
+        elapsed_time = time.time() - start_time
+
+        # Get statistics
+        total_docs = new_collection.count()
+
+        return (
+            f"✅ Manual re-indexing completed successfully!\n\n"
+            f"📊 Statistics:\n"
+            f"• Vaults indexed: {len(vaults)}\n"
+            f"• Total documents in database: {total_docs}\n"
+            f"• Time taken: {elapsed_time:.2f} seconds\n\n"
+            f"The vector store has been updated with the latest changes from your Obsidian vaults."
+        )
+
+    except Exception as e:
+        return f"❌ Re-indexing failed with error: {str(e)}\n\nPlease check your vault configurations and try again."
+
+
 class VaultChangeHandler(FileSystemEventHandler):
     """Handle file system changes in Obsidian vaults"""
 
@@ -787,9 +842,10 @@ async def monitor_vaults(vaults: List[Dict], update_interval: int = 10):
                         None, initialize_vector_store, vaults
                     )
 
-                    # Update global references
-                    chroma_client = new_client
-                    chroma_collection = new_collection
+                    # Update global references atomically
+                    with chroma_ref_lock:
+                        chroma_client = new_client
+                        chroma_collection = new_collection
 
                     print("✅ Re-indexing complete! Ready for queries.", file=sys.stderr)
 
