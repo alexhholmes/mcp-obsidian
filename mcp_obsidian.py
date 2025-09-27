@@ -307,6 +307,103 @@ def save_config(vaults):
     print(f"💾 Configuration saved to: {CONFIG_FILE}", file=sys.stderr)
 
 
+def configure_exclude_paths():
+    """Configure paths to exclude from indexing (glob patterns)"""
+    config = load_config()
+    exclude_patterns = config.get("exclude_patterns", [])
+
+    print("🚫 Configure Excluded Paths\n", file=sys.stderr)
+    print("Use glob patterns to exclude files/folders from indexing.", file=sys.stderr)
+    print("Examples:", file=sys.stderr)
+    print("  • **/Archive/**  (all Archive folders)", file=sys.stderr)
+    print("  • **/Private/*   (Private folder contents)", file=sys.stderr)
+    print("  • **/*.tmp.md    (temporary markdown files)", file=sys.stderr)
+    print("  • **/Trash/**    (Trash/Recycle folders)\n", file=sys.stderr)
+
+    while True:
+        # Show current patterns if any
+        if exclude_patterns:
+            print("📋 Current exclude patterns:", file=sys.stderr)
+            for i, pattern in enumerate(exclude_patterns, 1):
+                print(f"   {i}. {pattern}", file=sys.stderr)
+            print(file=sys.stderr)
+        else:
+            print("📭 No exclude patterns configured yet.\n", file=sys.stderr)
+
+        # Ask what to do
+        action = questionary.select(
+            "What would you like to do?",
+            choices=[
+                {"name": "Add Pattern", "value": "add"},
+                {"name": "Remove Pattern", "value": "remove"},
+                {"name": "Clear All Patterns", "value": "clear"},
+                {"name": "Back to Main Menu", "value": "back"}
+            ],
+            style=custom_style
+        ).ask()
+
+        if action == "back" or action is None:
+            break
+
+        elif action == "add":
+            # Add new pattern
+            pattern = questionary.text(
+                "Enter glob pattern to exclude:",
+                instruction="(e.g., **/Archive/** or **/*.tmp.md)",
+                style=custom_style
+            ).ask()
+
+            if pattern and pattern not in exclude_patterns:
+                exclude_patterns.append(pattern)
+                print(f"✅ Added pattern: {pattern}", file=sys.stderr)
+
+                # Save updated config
+                config["exclude_patterns"] = exclude_patterns
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(config, f, indent=2)
+                print(f"💾 Configuration saved", file=sys.stderr)
+            elif pattern in exclude_patterns:
+                print(f"⚠️  Pattern already exists: {pattern}", file=sys.stderr)
+
+        elif action == "remove" and exclude_patterns:
+            # Remove a pattern
+            choices = [{"name": pattern, "value": i} for i, pattern in enumerate(exclude_patterns)]
+            choices.append({"name": "Cancel", "value": -1})
+
+            selected = questionary.select(
+                "Select pattern to remove:",
+                choices=choices,
+                style=custom_style
+            ).ask()
+
+            if selected != -1 and selected is not None:
+                removed_pattern = exclude_patterns.pop(selected)
+                print(f"✅ Removed pattern: {removed_pattern}", file=sys.stderr)
+
+                # Save updated config
+                config["exclude_patterns"] = exclude_patterns
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(config, f, indent=2)
+                print(f"💾 Configuration saved", file=sys.stderr)
+
+        elif action == "clear" and exclude_patterns:
+            # Clear all patterns
+            if questionary.confirm(
+                f"Remove all {len(exclude_patterns)} exclude patterns?",
+                default=False,
+                style=custom_style
+            ).ask():
+                exclude_patterns = []
+                config["exclude_patterns"] = exclude_patterns
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(config, f, indent=2)
+                print("✅ All exclude patterns cleared", file=sys.stderr)
+                print(f"💾 Configuration saved", file=sys.stderr)
+
+        print(file=sys.stderr)  # Add spacing
+
+
 def configure():
     """Configure Obsidian vault paths"""
     print("🗂️  MCP Obsidian Configuration\n", file=sys.stderr)
@@ -319,8 +416,9 @@ def configure():
                     {"name": "Add Vault Path", "value": "1", "shortcut_key": "1"},
                     {"name": "List Vault Paths", "value": "2", "shortcut_key": "2"},
                     {"name": "Remove Vault Path", "value": "3", "shortcut_key": "3"},
-                    {"name": "Configure Claude Desktop", "value": "4", "shortcut_key": "4"},
-                    {"name": "Exit (^C)", "value": "5", "shortcut_key": "5"}
+                    {"name": "Exclude Paths", "value": "4", "shortcut_key": "4"},
+                    {"name": "Configure Claude Desktop", "value": "5", "shortcut_key": "5"},
+                    {"name": "Exit (^C)", "value": "6", "shortcut_key": "6"}
                 ],
                 style=custom_style,
                 use_shortcuts=True,
@@ -338,11 +436,66 @@ def configure():
         elif choice == "3":
             remove_vault_path()
         elif choice == "4":
+            configure_exclude_paths()
+        elif choice == "5":
             configure_claude_desktop()
-        elif choice == "5" or choice is None:
+        elif choice == "6" or choice is None:
             break
 
         print(file=sys.stderr)  # Add spacing between operations
+
+
+def is_file_excluded(file_path: Path, vault_path: Path) -> bool:
+    """Check if a file should be excluded based on configured patterns
+
+    Args:
+        file_path: The file path to check
+        vault_path: The vault root path (for relative path matching)
+
+    Returns:
+        True if the file should be excluded, False otherwise
+    """
+    import fnmatch
+
+    # Load current configuration to get latest exclude patterns
+    config = load_config()
+    exclude_patterns = config.get("exclude_patterns", [])
+
+    if not exclude_patterns:
+        return False
+
+    # Get relative path from vault root for pattern matching
+    try:
+        relative_path = file_path.relative_to(vault_path)
+        relative_str = str(relative_path).replace('\\', '/')  # Normalize path separators
+    except ValueError:
+        # If file is not in vault path, use absolute path
+        relative_str = str(file_path).replace('\\', '/')
+
+    # Check if file matches any exclude pattern
+    for pattern in exclude_patterns:
+        # Support ** glob patterns by converting to fnmatch pattern
+        # ** means any number of directories
+        fnmatch_pattern = pattern.replace('**/', '*/').replace('**', '*')
+
+        # Check both the relative path and the full path
+        if fnmatch.fnmatch(relative_str, pattern):
+            return True
+        if fnmatch.fnmatch(relative_str, fnmatch_pattern):
+            return True
+        # Also check against each path component for patterns like **/Archive/**
+        path_parts = relative_str.split('/')
+        for i in range(len(path_parts)):
+            partial_path = '/'.join(path_parts[i:])
+            if fnmatch.fnmatch(partial_path, pattern.lstrip('**/')):
+                return True
+            # Check if any directory in the path matches a directory pattern
+            if '**/' in pattern:
+                dir_pattern = pattern.replace('**/', '').rstrip('/*').rstrip('/**')
+                if dir_pattern in path_parts:
+                    return True
+
+    return False
 
 
 def get_markdown_files(vault_path: str) -> List[Path]:
@@ -356,6 +509,9 @@ def get_markdown_files(vault_path: str) -> List[Path]:
     for file_path in vault.rglob("*.md"):
         # Skip hidden directories and files
         if any(part.startswith('.') for part in file_path.parts):
+            continue
+        # Skip files matching exclude patterns
+        if is_file_excluded(file_path, vault):
             continue
         markdown_files.append(file_path)
 
