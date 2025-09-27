@@ -769,6 +769,41 @@ def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chroma
     return client, collection
 
 
+def get_full_path_from_metadata(metadata: Dict) -> str:
+    """
+    Get the full file path from search result metadata.
+
+    Args:
+        metadata: The metadata dictionary from search results
+
+    Returns:
+        The full absolute path to the file
+    """
+    # Try to get full path from stored file_path first
+    full_path = metadata.get('file_path')
+
+    # If not available, construct it from vault config
+    if not full_path:
+        vault_name = metadata.get('vault', 'Unknown vault')
+        relative_path = metadata.get('source', 'Unknown')
+
+        if vault_name != 'Unknown vault' and relative_path != 'Unknown':
+            config = load_config()
+            vaults = config.get("vaults", [])
+
+            for vault in vaults:
+                if vault["name"] == vault_name:
+                    vault_path = vault["path"]
+                    full_path = str(Path(vault_path) / relative_path)
+                    break
+
+    # Fallback to relative path if we couldn't construct full path
+    if not full_path:
+        full_path = metadata.get('source', 'Unknown')
+
+    return full_path
+
+
 def parse_contains_query(query: str) -> Dict:
     """
     Parse query with quoted phrases into semantic and exact phrase components.
@@ -914,9 +949,12 @@ async def semantic_search(
                 pattern = re.compile(re.escape(phrase), re.IGNORECASE)
                 preview = pattern.sub(lambda m: f"**{m.group()}**", preview)
 
+            # Get full path
+            full_path = get_full_path_from_metadata(metadata)
+
             result_text = (
                 f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
-                f"Source: {metadata.get('source', 'Unknown')}\n"
+                f"Path: {full_path}\n"
                 f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
                 f"Score: {1 - distance if distance else 'N/A'}\n\n"
                 f"{preview}"
@@ -1126,10 +1164,13 @@ async def temporal_search(
                     pattern = re.compile(re.escape(phrase), re.IGNORECASE)
                     preview = pattern.sub(lambda m: f"**{m.group()}**", preview)
 
+            # Get full path
+            full_path = get_full_path_from_metadata(metadata)
+
             result_text = (
                 f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
+                f"Path: {full_path}\n"
                 f"Modified: {modified_str} ({relative_time})\n"
-                f"Source: {metadata.get('source', 'Unknown')}\n"
                 f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
             )
 
