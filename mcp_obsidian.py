@@ -734,12 +734,13 @@ def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chroma
                     contents = [doc["content"] for doc in documents]
                     metadatas = [doc["metadata"] for doc in documents]
 
-                    # Add to collection
-                    collection.add(
-                        ids=ids,
-                        documents=contents,
-                        metadatas=metadatas
-                    )
+                    # Add to collection under lock protection
+                    with chroma_ref_lock:
+                        collection.add(
+                            ids=ids,
+                            documents=contents,
+                            metadatas=metadatas
+                        )
 
                     total_files_updated += 1
                     total_chunks_added += len(documents)
@@ -751,7 +752,8 @@ def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chroma
     if all_ids_to_delete:
         print(f"\n🗑️  Removing {len(all_ids_to_delete)} outdated chunks...", file=sys.stderr)
         try:
-            collection.delete(ids=all_ids_to_delete)
+            with chroma_ref_lock:
+                collection.delete(ids=all_ids_to_delete)
         except Exception as e:
             print(f"   Warning: Could not delete some chunks: {e}", file=sys.stderr)
 
@@ -782,23 +784,25 @@ async def semantic_search(
     """
     global chroma_collection
 
-    if not chroma_collection:
-        return "Vector store not initialized. Please restart the server."
-
-    # Cap limit at max
+    # Cap limit at max (doesn't need lock)
     limit = min(limit, MAX_SEARCH_LIMIT)
 
-    # Build where clause for filtering
-    where_clause = None
-    if vault_filter:
-        where_clause = {"vault": vault_filter}
+    # Acquire lock for the entire ChromaDB operation
+    with chroma_ref_lock:
+        if not chroma_collection:
+            return "Vector store not initialized. Please restart the server."
 
-    # Query the collection
-    results = chroma_collection.query(
-        query_texts=[query],
-        n_results=limit,
-        where=where_clause
-    )
+        # Build where clause for filtering
+        where_clause = None
+        if vault_filter:
+            where_clause = {"vault": vault_filter}
+
+        # Query the collection under lock protection
+        results = chroma_collection.query(
+            query_texts=[query],
+            n_results=limit,
+            where=where_clause
+        )
 
     # Format the results
     formatted_results = []
@@ -846,12 +850,9 @@ async def temporal_search(
         - Find notes from a specific period: since_date="2024-01-01", until_date="2024-01-31"
         - Find notes about "LSM trees" modified this month: query="LSM trees", since_date="2024-01-01"
     """
+    global chroma_collection
 
-
-    if not chroma_collection:
-        return "Vector store not initialized. Please restart the server."
-
-    # Cap limit at max
+    # Cap limit at max (doesn't need lock)
     limit = min(limit, MAX_SEARCH_LIMIT)
 
     # Parse dates and convert to timestamps
@@ -870,53 +871,58 @@ async def temporal_search(
     except ValueError as e:
         return f"Invalid date format. Please use YYYY-MM-DD. Error: {e}"
 
-    # Build where clause
-    where_conditions = []
+    # Acquire lock for the entire ChromaDB operation
+    with chroma_ref_lock:
+        if not chroma_collection:
+            return "Vector store not initialized. Please restart the server."
 
-    # Add date range filters
-    if since_timestamp and until_timestamp:
-        where_conditions.append({'modified': {'$gte': since_timestamp}})
-        where_conditions.append({'modified': {'$lte': until_timestamp}})
-    elif since_timestamp:
-        where_conditions.append({'modified': {'$gte': since_timestamp}})
-    elif until_timestamp:
-        where_conditions.append({'modified': {'$lte': until_timestamp}})
+        # Build where clause
+        where_conditions = []
 
-    # Add vault filter if specified
-    if vault_filter:
-        where_conditions.append({'vault': vault_filter})
+        # Add date range filters
+        if since_timestamp and until_timestamp:
+            where_conditions.append({'modified': {'$gte': since_timestamp}})
+            where_conditions.append({'modified': {'$lte': until_timestamp}})
+        elif since_timestamp:
+            where_conditions.append({'modified': {'$gte': since_timestamp}})
+        elif until_timestamp:
+            where_conditions.append({'modified': {'$lte': until_timestamp}})
 
-    # Combine conditions
-    where_clause = None
-    if len(where_conditions) > 1:
-        where_clause = {'$and': where_conditions}
-    elif where_conditions:
-        where_clause = where_conditions[0]
+        # Add vault filter if specified
+        if vault_filter:
+            where_conditions.append({'vault': vault_filter})
 
-    # Execute query
-    if query:
-        # Semantic search within date range
-        results = chroma_collection.query(
-            query_texts=[query],
-            n_results=limit,
-            where=where_clause
-        )
-    else:
-        # Get all documents in date range (no semantic search)
-        results = chroma_collection.get(
-            limit=limit,
-            where=where_clause,
-            include=['documents', 'metadatas']
-        )
-        # Restructure to match query() format
-        if results['documents']:
-            results = {
-                'documents': [results['documents']],
-                'metadatas': [results['metadatas']],
-                'distances': [[None] * len(results['documents'])]  # No distances for get()
-            }
+        # Combine conditions
+        where_clause = None
+        if len(where_conditions) > 1:
+            where_clause = {'$and': where_conditions}
+        elif where_conditions:
+            where_clause = where_conditions[0]
+
+        # Execute query under lock protection
+        if query:
+            # Semantic search within date range
+            results = chroma_collection.query(
+                query_texts=[query],
+                n_results=limit,
+                where=where_clause
+            )
         else:
-            results = {'documents': [[]], 'metadatas': [[]], 'distances': [[]]}
+            # Get all documents in date range (no semantic search)
+            results = chroma_collection.get(
+                limit=limit,
+                where=where_clause,
+                include=['documents', 'metadatas']
+            )
+            # Restructure to match query() format
+            if results['documents']:
+                results = {
+                    'documents': [results['documents']],
+                    'metadatas': [results['metadatas']],
+                    'distances': [[None] * len(results['documents'])]  # No distances for get()
+                }
+            else:
+                results = {'documents': [[]], 'metadatas': [[]], 'distances': [[]]}
 
     # Format the results with enhanced date information
     formatted_results = []
@@ -1134,7 +1140,12 @@ def serve():
     print("🚀 Starting MCP Obsidian server...", file=sys.stderr)
 
     # Initialize vector store
-    chroma_client, chroma_collection = initialize_vector_store(vaults)
+    new_client, new_collection = initialize_vector_store(vaults)
+
+    # Update global references atomically
+    with chroma_ref_lock:
+        chroma_client = new_client
+        chroma_collection = new_collection
 
     print("\n📡 MCP server ready!", file=sys.stderr)
     print("Vector store initialized and ready for queries.", file=sys.stderr)
@@ -1176,11 +1187,17 @@ def index_vaults():
     print(f"Found {len(vaults)} vault(s) to index.\n", file=sys.stderr)
 
     # Initialize vector store (this will rebuild the entire index)
-    chroma_client, chroma_collection = initialize_vector_store(vaults)
+    new_client, new_collection = initialize_vector_store(vaults)
+
+    # Update global references atomically
+    with chroma_ref_lock:
+        global chroma_client, chroma_collection
+        chroma_client = new_client
+        chroma_collection = new_collection
 
     # Show results
-    if chroma_collection:
-        doc_count = chroma_collection.count()
+    if new_collection:
+        doc_count = new_collection.count()
         print(f"\n✅ Index rebuilt successfully!", file=sys.stderr)
         print(f"📊 Total documents indexed: {doc_count}", file=sys.stderr)
 
