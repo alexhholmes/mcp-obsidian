@@ -1,27 +1,40 @@
 #!/usr/bin/env python3
 import argparse
-import json
-import sys
-import hashlib
-import os
 import asyncio
+import hashlib
+import json
+import os
 import re
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import chromadb
+import questionary
+from chromadb.config import Settings
+from fastmcp import FastMCP
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from questionary import Style
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.observers import Observer
+
 
 # Disable ChromaDB telemetry before importing to prevent errors
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-import questionary
-from questionary import Style
-import chromadb
-from chromadb.config import Settings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from fastmcp import FastMCP
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileSystemEvent
+
+class Log:
+    """Simple logger for consistent output formatting."""
+    @staticmethod
+    def info(msg): print(f"ℹ️  {msg}", file=sys.stderr)
+    @staticmethod
+    def success(msg): print(f"✅ {msg}", file=sys.stderr)
+    @staticmethod
+    def error(msg): print(f"❌ {msg}", file=sys.stderr)
+    @staticmethod
+    def warning(msg): print(f"⚠️  {msg}", file=sys.stderr)
 
 
 # Configuration paths
@@ -73,6 +86,15 @@ custom_style = Style([
 ])
 
 
+def check_vaults_configured(vaults: List, message: str = "No vaults configured yet.") -> bool:
+    """Check if vaults are configured, print message if not."""
+    if not vaults:
+        print(f"📭 {message}", file=sys.stderr)
+        print("Use 'Add Vault Path' to configure your first vault.", file=sys.stderr)
+        return False
+    return True
+
+
 def add_vault_path():
     """Add a new vault path to the configuration"""
     existing_config = load_config()
@@ -94,7 +116,7 @@ def add_vault_path():
 
         # Check if already configured
         if str(path) in existing_paths:
-            print(f"⚠️  Vault already configured: {path}\n", file=sys.stderr)
+            Log.warning(f"Vault already configured: {path}\n")
             continue
 
         # Validate path exists
@@ -119,7 +141,7 @@ def add_vault_path():
         })
         existing_paths.add(str(path))
 
-        print(f"✅ Added: {vault_name} → {path}\n", file=sys.stderr)
+        Log.success(f"Added: {vault_name} → {path}\n")
 
         if not questionary.confirm(
             "Add another vault?",
@@ -138,9 +160,7 @@ def list_vault_paths():
     config = load_config()
     vaults = config.get("vaults", [])
 
-    if not vaults:
-        print("📭 No vaults configured yet.", file=sys.stderr)
-        print("Use 'Add Vault Path' to configure your first vault.", file=sys.stderr)
+    if not check_vaults_configured(vaults):
         return
 
     print(f"📚 Configured Vaults ({len(vaults)}):\n", file=sys.stderr)
@@ -156,9 +176,7 @@ def remove_vault_path():
     config = load_config()
     vaults = config.get("vaults", [])
 
-    if not vaults:
-        print("📭 No vaults configured yet.", file=sys.stderr)
-        print("Use 'Add Vault Path' to configure your first vault.", file=sys.stderr)
+    if not check_vaults_configured(vaults):
         return
 
     print(f"📚 Select vault to remove:\n", file=sys.stderr)
@@ -193,19 +211,8 @@ def remove_vault_path():
     ).ask():
         # Remove the vault
         vaults.pop(selected)
-
-        # Save updated configuration
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        config = {
-            "vaults": vaults,
-            "version": "1.0"
-        }
-
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=2)
-
-        print(f"✅ Removed: {vault_to_remove['name']} → {vault_to_remove['path']}", file=sys.stderr)
-        print(f"💾 Configuration updated: {CONFIG_FILE}", file=sys.stderr)
+        save_config(vaults)
+        Log.success(f"Removed: {vault_to_remove['name']} → {vault_to_remove['path']}")
     else:
         print("Removal cancelled.", file=sys.stderr)
 
@@ -236,7 +243,7 @@ def configure_claude_desktop():
             with open(claude_config_path, 'r') as f:
                 claude_config = json.load(f)
         except json.JSONDecodeError:
-            print("⚠️  Existing configuration is invalid. Creating new configuration.\n", file=sys.stderr)
+            Log.warning("Existing configuration is invalid. Creating new configuration.\n")
             claude_config = {}
 
     # Ensure mcpServers section exists
@@ -246,7 +253,7 @@ def configure_claude_desktop():
     # Check if obsidian is already configured
     if "obsidian" in claude_config["mcpServers"]:
         existing = claude_config["mcpServers"]["obsidian"]
-        print("⚠️  MCP Obsidian is already configured in Claude Desktop:", file=sys.stderr)
+        Log.warning("MCP Obsidian is already configured in Claude Desktop:")
         print(f"   Command: {existing.get('command', 'Not set')}", file=sys.stderr)
 
         if not questionary.confirm(
@@ -267,7 +274,7 @@ def configure_claude_desktop():
         with open(claude_config_path, 'w') as f:
             json.dump(claude_config, f, indent=2)
 
-        print("\n✅ Claude Desktop configuration updated successfully!", file=sys.stderr)
+        Log.success("\nClaude Desktop configuration updated successfully!")
         print("\n📋 Configuration added:", file=sys.stderr)
         print('   "obsidian": {', file=sys.stderr)
         print('     "command": "mcp-obsidian"', file=sys.stderr)
@@ -278,7 +285,7 @@ def configure_claude_desktop():
         config = load_config()
         vaults = config.get("vaults", [])
         if not vaults:
-            print("\n⚠️  No vaults configured yet!", file=sys.stderr)
+            Log.warning("\nNo vaults configured yet!")
             print("   Run 'mcp-obsidian configure' and select 'Add Vault Path' to add your Obsidian vaults.", file=sys.stderr)
 
     except Exception as e:
@@ -294,12 +301,21 @@ def configure_claude_desktop():
         print('}', file=sys.stderr)
 
 
-def save_config(vaults):
-    """Save the configuration to file"""
+def save_config(vaults=None, exclude_patterns=None):
+    """Save the configuration to file
+
+    Args:
+        vaults: List of vault configurations (if None, keeps existing)
+        exclude_patterns: List of exclude patterns (if None, keeps existing)
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Load existing config to preserve unchanged values
+    existing = load_config()
+
     config = {
-        "vaults": vaults,
+        "vaults": vaults if vaults is not None else existing.get("vaults", []),
+        "exclude_patterns": exclude_patterns if exclude_patterns is not None else existing.get("exclude_patterns", []),
         "version": "1.0"
     }
 
@@ -357,14 +373,10 @@ def configure_exclude_paths():
 
             if pattern and pattern not in exclude_patterns:
                 exclude_patterns.append(pattern)
-                print(f"✅ Added pattern: {pattern}", file=sys.stderr)
+                Log.success(f"Added pattern: {pattern}")
 
                 # Save updated config
-                config["exclude_patterns"] = exclude_patterns
-                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-                with open(CONFIG_FILE, 'w') as f:
-                    json.dump(config, f, indent=2)
-                print(f"💾 Configuration saved", file=sys.stderr)
+                save_config(exclude_patterns=exclude_patterns)
             elif pattern in exclude_patterns:
                 print(f"⚠️  Pattern already exists: {pattern}", file=sys.stderr)
 
@@ -381,13 +393,10 @@ def configure_exclude_paths():
 
             if selected != -1 and selected is not None:
                 removed_pattern = exclude_patterns.pop(selected)
-                print(f"✅ Removed pattern: {removed_pattern}", file=sys.stderr)
+                Log.success(f"Removed pattern: {removed_pattern}")
 
                 # Save updated config
-                config["exclude_patterns"] = exclude_patterns
-                with open(CONFIG_FILE, 'w') as f:
-                    json.dump(config, f, indent=2)
-                print(f"💾 Configuration saved", file=sys.stderr)
+                save_config(exclude_patterns=exclude_patterns)
 
         elif action == "clear" and exclude_patterns:
             # Clear all patterns
@@ -397,11 +406,8 @@ def configure_exclude_paths():
                 style=custom_style
             ).ask():
                 exclude_patterns = []
-                config["exclude_patterns"] = exclude_patterns
-                with open(CONFIG_FILE, 'w') as f:
-                    json.dump(config, f, indent=2)
-                print("✅ All exclude patterns cleared", file=sys.stderr)
-                print(f"💾 Configuration saved", file=sys.stderr)
+                save_config(exclude_patterns=exclude_patterns)
+                Log.success("All exclude patterns cleared")
 
         print(file=sys.stderr)  # Add spacing
 
@@ -448,54 +454,41 @@ def configure():
 
 
 def is_file_excluded(file_path: Path, vault_path: Path) -> bool:
-    """Check if a file should be excluded based on configured patterns
+    """Check if a file should be excluded based on configured patterns.
 
-    Args:
-        file_path: The file path to check
-        vault_path: The vault root path (for relative path matching)
-
-    Returns:
-        True if the file should be excluded, False otherwise
+    Supports patterns like:
+    - **/Archive/** - any Archive directory
+    - **/*.tmp.md - temporary markdown files
+    - **/Private/* - Private folder contents
     """
     import fnmatch
 
-    # Load current configuration to get latest exclude patterns
     config = load_config()
     exclude_patterns = config.get("exclude_patterns", [])
 
     if not exclude_patterns:
         return False
 
-    # Get relative path from vault root for pattern matching
+    # Get relative path from vault root
     try:
-        relative_path = file_path.relative_to(vault_path)
-        relative_str = str(relative_path).replace('\\', '/')  # Normalize path separators
+        relative_str = str(file_path.relative_to(vault_path)).replace('\\', '/')
     except ValueError:
-        # If file is not in vault path, use absolute path
         relative_str = str(file_path).replace('\\', '/')
 
-    # Check if file matches any exclude pattern
+    # Check each pattern
     for pattern in exclude_patterns:
-        # Support ** glob patterns by converting to fnmatch pattern
-        # ** means any number of directories
+        # Convert ** to fnmatch format
         fnmatch_pattern = pattern.replace('**/', '*/').replace('**', '*')
 
-        # Check both the relative path and the full path
-        if fnmatch.fnmatch(relative_str, pattern):
+        # Direct match
+        if fnmatch.fnmatch(relative_str, pattern) or fnmatch.fnmatch(relative_str, fnmatch_pattern):
             return True
-        if fnmatch.fnmatch(relative_str, fnmatch_pattern):
-            return True
-        # Also check against each path component for patterns like **/Archive/**
-        path_parts = relative_str.split('/')
-        for i in range(len(path_parts)):
-            partial_path = '/'.join(path_parts[i:])
-            if fnmatch.fnmatch(partial_path, pattern.lstrip('**/')):
+
+        # Check if any directory in path matches a directory pattern (e.g., **/Archive/**)
+        if '**/' in pattern:
+            dir_name = pattern.replace('**/', '').rstrip('/*').rstrip('/**')
+            if dir_name in relative_str.split('/'):
                 return True
-            # Check if any directory in the path matches a directory pattern
-            if '**/' in pattern:
-                dir_pattern = pattern.replace('**/', '').rstrip('/*').rstrip('/**')
-                if dir_pattern in path_parts:
-                    return True
 
     return False
 
@@ -538,7 +531,7 @@ def chunk_markdown_content(file_path: Path, vault_path: Path, vault_name: str) -
         file_size = os.path.getsize(file_path)
         if file_size > MAX_FILE_SIZE_BYTES:
             size_mb = file_size / (1024 * 1024)
-            print(f"⚠️  Skipping large file ({size_mb:.1f}MB): {file_path.name}", file=sys.stderr)
+            Log.warning(f"Skipping large file ({size_mb:.1f}MB): {file_path.name}")
             return []  # Skip files that are too large
 
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -744,7 +737,7 @@ def initialize_vector_store(vaults: List[Dict], force_rebuild: bool = False) -> 
         all_ids_to_delete.extend(ids_to_delete)
 
         if not files_to_update and not ids_to_delete:
-            print(f"   ✅ Vault is up to date", file=sys.stderr)
+            Log.success("   Vault is up to date")
             continue
 
         if ids_to_delete:
@@ -777,7 +770,7 @@ def initialize_vector_store(vaults: List[Dict], force_rebuild: bool = False) -> 
                     total_chunks_added += len(documents)
 
             # Clear the progress line and show completion
-            print(f"   ✅ Updated {len(files_to_update)} files from {vault_name}                    ", file=sys.stderr)
+            Log.success(f"   Updated {len(files_to_update)} files from {vault_name}                    ")
 
     # Delete outdated chunks if any
     if all_ids_to_delete:
@@ -790,7 +783,7 @@ def initialize_vector_store(vaults: List[Dict], force_rebuild: bool = False) -> 
 
     total_docs = collection.count()
 
-    print(f"\n✅ Indexing complete!", file=sys.stderr)
+    Log.success("\nIndexing complete!")
     print(f"   Files updated: {total_files_updated}", file=sys.stderr)
     print(f"   Files removed: {total_files_deleted}", file=sys.stderr)
     print(f"   Chunks added: {total_chunks_added}", file=sys.stderr)
@@ -1031,7 +1024,7 @@ async def search(
         # Format the sorted results
         for doc, metadata, distance in docs_with_metadata:
             # Show date if temporal filter is used
-            formatted_results.append(_format_search_result(doc, metadata, distance, parsed, show_date=has_temporal_filter))
+            formatted_results.append(format_search_result(doc, metadata, distance, parsed, show_date=has_temporal_filter))
 
     if not formatted_results:
         error_parts = []
@@ -1091,7 +1084,39 @@ def _sort_results(docs_with_metadata: List[Tuple], sort_by: str, sort_order: str
     return sorted(docs_with_metadata, key=sort_key, reverse=reverse)
 
 
-def _format_search_result(doc: str, metadata: Dict, distance: Optional[float], parsed: Dict, show_date: bool = False) -> str:
+def format_size(bytes_size: int) -> str:
+    """Format bytes to human readable string."""
+    if bytes_size < 1024:
+        return f"{bytes_size} bytes"
+    elif bytes_size < 1024 * 1024:
+        return f"{bytes_size / 1024:.1f} KB"
+    else:
+        return f"{bytes_size / (1024 * 1024):.1f} MB"
+
+
+def format_relative_time(timestamp: int) -> Tuple[str, str]:
+    """Format timestamp to date string and relative time."""
+    dt = datetime.fromtimestamp(timestamp)
+    date_str = dt.strftime("%Y-%m-%d %H:%M")
+
+    now = datetime.now()
+    diff = now - dt
+
+    if diff.days == 0:
+        relative = f"{diff.seconds // 3600} hours ago" if diff.seconds >= 3600 else f"{diff.seconds // 60} minutes ago"
+    elif diff.days == 1:
+        relative = "Yesterday"
+    elif diff.days < 7:
+        relative = f"{diff.days} days ago"
+    elif diff.days < 30:
+        relative = f"{diff.days // 7} weeks ago"
+    else:
+        relative = f"{diff.days // 30} months ago"
+
+    return date_str, relative
+
+
+def format_search_result(doc: str, metadata: Dict, distance: Optional[float], parsed: Dict, show_date: bool = False) -> str:
     """Helper function to format a single search result"""
     # Create preview and highlight matched phrases
     preview = doc[:PREVIEW_LENGTH]
@@ -1113,40 +1138,14 @@ def _format_search_result(doc: str, metadata: Dict, distance: Optional[float], p
     # Add file size if available
     file_size_bytes = metadata.get('file_size_bytes')
     if file_size_bytes:
-        # Format file size for human readability
-        if file_size_bytes < 1024:
-            size_str = f"{file_size_bytes} bytes"
-        elif file_size_bytes < 1024 * 1024:
-            size_str = f"{file_size_bytes / 1024:.1f} KB"
-        else:
-            size_str = f"{file_size_bytes / (1024 * 1024):.1f} MB"
-        result_text += f"Size: {size_str}\n"
+        result_text += f"Size: {format_size(file_size_bytes)}\n"
 
     # Add date info if requested
     if show_date:
         modified_timestamp = metadata.get('modified', 0)
         if modified_timestamp:
-            modified_dt = datetime.fromtimestamp(modified_timestamp)
-            modified_str = modified_dt.strftime("%Y-%m-%d %H:%M")
-
-            # Calculate relative time
-            now = datetime.now()
-            time_diff = now - modified_dt
-            if time_diff.days == 0:
-                if time_diff.seconds < 3600:
-                    relative_time = f"{time_diff.seconds // 60} minutes ago"
-                else:
-                    relative_time = f"{time_diff.seconds // 3600} hours ago"
-            elif time_diff.days == 1:
-                relative_time = "Yesterday"
-            elif time_diff.days < 7:
-                relative_time = f"{time_diff.days} days ago"
-            elif time_diff.days < 30:
-                relative_time = f"{time_diff.days // 7} weeks ago"
-            else:
-                relative_time = f"{time_diff.days // 30} months ago"
-
-            result_text += f"Modified: {modified_str} ({relative_time})\n"
+            date_str, relative_time = format_relative_time(modified_timestamp)
+            result_text += f"Modified: {date_str} ({relative_time})\n"
 
     result_text += f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
 
@@ -1279,7 +1278,7 @@ async def monitor_vaults(vaults: List[Dict], update_interval: int = MONITOR_UPDA
                         chroma_client = new_client
                         chroma_collection = new_collection
 
-                    print("✅ Re-indexing complete! Ready for queries.", file=sys.stderr)
+                    Log.success("Re-indexing complete! Ready for queries.")
 
     except asyncio.CancelledError:
         # Clean shutdown
@@ -1360,7 +1359,7 @@ def index_vaults(force=False):
     # Show results
     if new_collection:
         doc_count = new_collection.count()
-        print(f"\n✅ Index rebuilt successfully!", file=sys.stderr)
+        Log.success("\nIndex rebuilt successfully!")
         print(f"📊 Total documents indexed: {doc_count}", file=sys.stderr)
 
         # Show vaults that were indexed
@@ -1368,7 +1367,7 @@ def index_vaults(force=False):
         for vault in vaults:
             print(f"   - {vault['name']} ({vault['path']})", file=sys.stderr)
     else:
-        print("❌ Failed to rebuild index.", file=sys.stderr)
+        Log.error("Failed to rebuild index.")
         sys.exit(1)
 
 
@@ -1386,10 +1385,7 @@ def main():
     parser = argparse.ArgumentParser(description="MCP Obsidian Server")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    # Configure subcommand
     subparsers.add_parser("configure", help="Configure vault paths")
-
-    # Index subcommand
     index_parser = subparsers.add_parser("index", help="Rebuild search index for all configured vaults")
     index_parser.add_argument("-f", "--force", action="store_true",
                              help="Force complete rebuild by clearing existing index")
@@ -1397,13 +1393,13 @@ def main():
     # Parse arguments
     args = parser.parse_args()
 
-    if args.command == "configure":
-        configure()
-    elif args.command == "index":
-        index_vaults(force=args.force)
-    else:
-        # Default to server mode
-        serve()
+    commands = {
+        "configure": configure,
+        "index": lambda: index_vaults(args.force),
+        None: serve
+    }
+
+    commands.get(args.command, serve)()
 
 
 if __name__ == "__main__":
