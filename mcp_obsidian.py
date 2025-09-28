@@ -858,6 +858,8 @@ async def search(
     vault_filter: Optional[str] = None,
     since_date: Optional[str] = None,
     until_date: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
     limit: int = DEFAULT_SEARCH_LIMIT
 ) -> str:
     """
@@ -873,12 +875,15 @@ async def search(
         vault_filter: Optional filter results to a specific vault name
         since_date: Optional start date in YYYY-MM-DD format (inclusive)
         until_date: Optional end date in YYYY-MM-DD format (inclusive)
+        sort_by: Sort results by "relevance" (default), "date", "title", or "path"
+        sort_order: Sort order "desc" (default) or "asc"
         limit: Maximum number of results to return (default: 10, max: 20)
 
     Examples:
     - 'PKM "second brain"' - Semantic search for PKM containing "second brain"
     - 'meeting -"cancelled"' with since_date="2024-01-01" - Recent meeting notes
-    - '"daily note"' with since_date="2024-01-01", until_date="2024-01-31" - Daily notes from January
+    - '"daily note"' with sort_by="date" - Daily notes sorted by modification date
+    - 'python' with sort_by="title", sort_order="asc" - Python notes sorted A-Z
     """
     global chroma_collection
 
@@ -978,31 +983,30 @@ async def search(
             # No query at all
             return "Please provide a search query."
 
-    # Format the results with enhanced date information if dates were used
+    # Process and format the results
     formatted_results = []
-    now = datetime.now()
     has_temporal_filter = since_date or until_date
 
     if results["documents"] and results["documents"][0]:
-        # If temporal filter, sort by modification time
-        if has_temporal_filter:
-            docs_with_metadata = []
-            for i, doc in enumerate(results["documents"][0]):
-                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-                distance = results["distances"][0][i] if results["distances"] else None
-                docs_with_metadata.append((doc, metadata, distance))
+        # Collect all docs with metadata
+        docs_with_metadata = []
+        for i, doc in enumerate(results["documents"][0]):
+            metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+            distance = results["distances"][0][i] if results["distances"] else None
+            docs_with_metadata.append((doc, metadata, distance))
 
-            # Sort by modified timestamp (most recent first)
-            docs_with_metadata.sort(key=lambda x: x[1].get('modified', 0), reverse=True)
+        # Apply sorting based on sort_by parameter (default to relevance)
+        if sort_by or sort_order != "desc":  # If sort parameters were explicitly set
+            docs_with_metadata = _sort_results(docs_with_metadata, sort_by or "relevance", sort_order)
+        elif not parsed['semantic_query']:  # No semantic query means no relevance sorting needed
+            # Default to date sorting for non-semantic queries
+            docs_with_metadata = _sort_results(docs_with_metadata, "date", "desc")
+        # else: Keep ChromaDB's relevance order (already sorted by distance)
 
-            for doc, metadata, distance in docs_with_metadata:
-                formatted_results.append(_format_search_result(doc, metadata, distance, parsed, show_date=True))
-        else:
-            # Regular semantic search ordering
-            for i, doc in enumerate(results["documents"][0]):
-                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-                distance = results["distances"][0][i] if results["distances"] else None
-                formatted_results.append(_format_search_result(doc, metadata, distance, parsed, show_date=False))
+        # Format the sorted results
+        for doc, metadata, distance in docs_with_metadata:
+            # Show date if temporal filter is used
+            formatted_results.append(_format_search_result(doc, metadata, distance, parsed, show_date=has_temporal_filter))
 
     if not formatted_results:
         error_parts = []
@@ -1022,6 +1026,44 @@ async def search(
 
     # Return results as a single formatted string
     return "\n\n---\n\n".join(formatted_results)
+
+
+def _sort_results(docs_with_metadata: List[Tuple], sort_by: str, sort_order: str) -> List[Tuple]:
+    """
+    Sort search results based on the specified criteria.
+
+    Args:
+        docs_with_metadata: List of tuples (doc, metadata, distance)
+        sort_by: Sort criteria ("relevance", "date", "title", "path")
+        sort_order: Sort order ("asc" or "desc")
+
+    Returns:
+        Sorted list of tuples
+    """
+    # Define sort key functions for each type
+    if sort_by == "date":
+        # Sort by modification timestamp
+        sort_key = lambda x: x[1].get('modified', 0)
+    elif sort_by == "title":
+        # Sort alphabetically by title (case-insensitive)
+        sort_key = lambda x: x[1].get('title', '').lower()
+    elif sort_by == "path":
+        # Sort by relative path (source)
+        sort_key = lambda x: x[1].get('source', '').lower()
+    else:  # Default to "relevance"
+        # Sort by distance (lower is better)
+        # Note: When sorting by relevance, we want LOWER distances first (better matches)
+        # So for desc order (default), we actually use ascending sort on distance
+        sort_key = lambda x: x[2] if x[2] is not None else float('inf')
+
+    # Apply sort
+    reverse = (sort_order == "desc")
+
+    # Special case for relevance: desc means best matches first (lowest distance)
+    if sort_by == "relevance" or sort_by is None:
+        reverse = not reverse  # Invert for relevance
+
+    return sorted(docs_with_metadata, key=sort_key, reverse=reverse)
 
 
 def _format_search_result(doc: str, metadata: Dict, distance: Optional[float], parsed: Dict, show_date: bool = False) -> str:
