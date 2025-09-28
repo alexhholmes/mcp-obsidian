@@ -544,6 +544,9 @@ def chunk_markdown_content(file_path: Path, vault_path: Path, vault_name: str) -
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
+        # Calculate actual content size in bytes
+        content_size_bytes = len(content.encode('utf-8'))
+
         # Get file metadata
         file_stats = os.stat(file_path)
         modified_time = int(file_stats.st_mtime)
@@ -597,6 +600,7 @@ def chunk_markdown_content(file_path: Path, vault_path: Path, vault_name: str) -
                     "start_line": start_line,
                     "end_line": end_line,
                     "file_path": str(file_path),  # Keep absolute path for reference
+                    "file_size_bytes": content_size_bytes,  # Size of the full document
                     "chunk_index": i,
                     "total_chunks": len(chunks)
                 }
@@ -674,8 +678,29 @@ def get_files_to_update(collection: chromadb.Collection, vault_files: List[Path]
     return files_to_update, ids_to_delete
 
 
-def initialize_vector_store(vaults: List[Dict]) -> Tuple[chromadb.Client, chromadb.Collection]:
-    """Initialize ChromaDB and incrementally index vault content"""
+def initialize_vector_store(vaults: List[Dict], force_rebuild: bool = False) -> Tuple[chromadb.Client, chromadb.Collection]:
+    """Initialize ChromaDB and incrementally index vault content
+
+    Args:
+        vaults: List of vault configurations
+        force_rebuild: If True, clear existing database before rebuilding
+    """
+    # Handle force rebuild under lock
+    if force_rebuild:
+        with chroma_ref_lock:
+            print("🔥 Force rebuilding index (clearing existing data)...", file=sys.stderr)
+            # Clear the existing database
+            db_path = CONFIG_DIR / CHROMA_DB_DIR
+            if db_path.exists():
+                import shutil
+                shutil.rmtree(db_path)
+                print("   Cleared existing index", file=sys.stderr)
+
+            # Clear global references while rebuilding
+            global chroma_client, chroma_collection
+            chroma_client = None
+            chroma_collection = None
+
     print("🔄 Initializing vector store...", file=sys.stderr)
 
     # Disable ChromaDB telemetry to avoid errors
@@ -878,6 +903,9 @@ async def search(
         sort_by: Sort results by "relevance" (default), "date", "title", or "path"
         sort_order: Sort order "desc" (default) or "asc"
         limit: Maximum number of results to return (default: 10, max: 20)
+
+    Note: Results include file size metadata to help determine if retrieving
+    the full document is feasible. Files larger than 10MB are not indexed.
 
     Examples:
     - 'PKM "second brain"' - Semantic search for PKM containing "second brain"
@@ -1084,6 +1112,18 @@ def _format_search_result(doc: str, metadata: Dict, distance: Optional[float], p
     # Build result text
     result_text = f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
     result_text += f"Path: {full_path}\n"
+
+    # Add file size if available
+    file_size_bytes = metadata.get('file_size_bytes')
+    if file_size_bytes:
+        # Format file size for human readability
+        if file_size_bytes < 1024:
+            size_str = f"{file_size_bytes} bytes"
+        elif file_size_bytes < 1024 * 1024:
+            size_str = f"{file_size_bytes / 1024:.1f} KB"
+        else:
+            size_str = f"{file_size_bytes / (1024 * 1024):.1f} MB"
+        result_text += f"Size: {size_str}\n"
 
     # Add date info if requested
     if show_date:
@@ -1298,7 +1338,7 @@ def serve():
     mcp.run()
 
 
-def index_vaults():
+def index_vaults(force=False):
     """Rebuild search index for all configured vaults"""
     global chroma_client, chroma_collection
 
@@ -1312,12 +1352,11 @@ def index_vaults():
     print("🔄 Rebuilding search index for all configured vaults...", file=sys.stderr)
     print(f"Found {len(vaults)} vault(s) to index.\n", file=sys.stderr)
 
-    # Initialize vector store (this will rebuild the entire index)
-    new_client, new_collection = initialize_vector_store(vaults)
+    # Initialize vector store with force flag (handles locking internally)
+    new_client, new_collection = initialize_vector_store(vaults, force_rebuild=force)
 
     # Update global references atomically
     with chroma_ref_lock:
-        global chroma_client, chroma_collection
         chroma_client = new_client
         chroma_collection = new_collection
 
@@ -1354,7 +1393,9 @@ def main():
     subparsers.add_parser("configure", help="Configure vault paths")
 
     # Index subcommand
-    subparsers.add_parser("index", help="Rebuild search index for all configured vaults")
+    index_parser = subparsers.add_parser("index", help="Rebuild search index for all configured vaults")
+    index_parser.add_argument("-f", "--force", action="store_true",
+                             help="Force complete rebuild by clearing existing index")
 
     # Parse arguments
     args = parser.parse_args()
@@ -1362,7 +1403,7 @@ def main():
     if args.command == "configure":
         configure()
     elif args.command == "index":
-        index_vaults()
+        index_vaults(force=args.force)
     else:
         # Default to server mode
         serve()
