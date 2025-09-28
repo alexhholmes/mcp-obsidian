@@ -544,9 +544,6 @@ def chunk_markdown_content(file_path: Path, vault_path: Path, vault_name: str) -
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # Calculate actual content size in bytes
-        content_size_bytes = len(content.encode('utf-8'))
-
         # Get file metadata
         file_stats = os.stat(file_path)
         modified_time = int(file_stats.st_mtime)
@@ -600,7 +597,7 @@ def chunk_markdown_content(file_path: Path, vault_path: Path, vault_name: str) -
                     "start_line": start_line,
                     "end_line": end_line,
                     "file_path": str(file_path),  # Keep absolute path for reference
-                    "file_size_bytes": content_size_bytes,  # Size of the full document
+                    "file_size_bytes": file_size,  # Size of the full document
                     "chunk_index": i,
                     "total_chunks": len(chunks)
                 }
