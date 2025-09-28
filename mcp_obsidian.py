@@ -37,6 +37,7 @@ CHROMA_COLLECTION_DESC = "Obsidian vault notes"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 CHUNK_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 # Search settings
 DEFAULT_SEARCH_LIMIT = 10
@@ -533,6 +534,13 @@ def get_line_boundaries(text: str, chunk_start: int, chunk_end: int) -> Tuple[in
 def chunk_markdown_content(file_path: Path, vault_path: Path, vault_name: str) -> List[Dict]:
     """Read and chunk a markdown file with enhanced metadata"""
     try:
+        # Check file size before loading
+        file_size = os.path.getsize(file_path)
+        if file_size > MAX_FILE_SIZE_BYTES:
+            size_mb = file_size / (1024 * 1024)
+            print(f"⚠️  Skipping large file ({size_mb:.1f}MB): {file_path.name}", file=sys.stderr)
+            return []  # Skip files that are too large
+
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
@@ -845,28 +853,32 @@ def parse_contains_query(query: str) -> Dict:
 
 
 @mcp.tool
-async def semantic_search(
+async def search(
     query: str,
     vault_filter: Optional[str] = None,
+    since_date: Optional[str] = None,
+    until_date: Optional[str] = None,
     limit: int = DEFAULT_SEARCH_LIMIT
 ) -> str:
     """
-    Search Obsidian vault notes using semantic similarity with optional exact phrase matching.
+    Unified search with semantic, exact phrase, and temporal filtering.
 
     Query syntax:
     - "exact phrase" - Must contain this exact phrase (case-sensitive)
     - -"excluded phrase" - Must not contain this phrase
     - Regular text - Semantic similarity search
 
-    Examples:
-    - 'PKM "second brain"' - Semantic search for PKM that must contain "second brain"
-    - 'python async -"deprecated"' - Find async Python, exclude "deprecated"
-    - '"daily note"' - Find all notes containing "daily note"
-
     Args:
         query: The search query with optional quoted phrases
         vault_filter: Optional filter results to a specific vault name
+        since_date: Optional start date in YYYY-MM-DD format (inclusive)
+        until_date: Optional end date in YYYY-MM-DD format (inclusive)
         limit: Maximum number of results to return (default: 10, max: 20)
+
+    Examples:
+    - 'PKM "second brain"' - Semantic search for PKM containing "second brain"
+    - 'meeting -"cancelled"' with since_date="2024-01-01" - Recent meeting notes
+    - '"daily note"' with since_date="2024-01-01", until_date="2024-01-31" - Daily notes from January
     """
     global chroma_collection
 
@@ -876,140 +888,7 @@ async def semantic_search(
     # Parse the query for quoted phrases
     parsed = parse_contains_query(query)
 
-    # Acquire lock for the entire ChromaDB operation
-    with chroma_ref_lock:
-        if not chroma_collection:
-            return "Vector store not initialized. Please restart the server."
-
-        # Build where clause for metadata filtering
-        where_clause = None
-        if vault_filter:
-            where_clause = {"vault": vault_filter}
-
-        # Build where_document clause for phrase filtering
-        doc_conditions = []
-
-        for phrase in parsed['required_phrases']:
-            doc_conditions.append({"$contains": phrase})
-
-        for phrase in parsed['excluded_phrases']:
-            doc_conditions.append({"$not_contains": phrase})
-
-        # Combine document conditions
-        where_document = None
-        if len(doc_conditions) > 1:
-            where_document = {"$and": doc_conditions}
-        elif doc_conditions:
-            where_document = doc_conditions[0]
-
-        # Execute search based on what we have
-        if parsed['semantic_query']:
-            # Semantic search with optional phrase filters
-            results = chroma_collection.query(
-                query_texts=[parsed['semantic_query']],
-                n_results=limit,
-                where=where_clause,
-                where_document=where_document
-            )
-        elif where_document:
-            # Pure phrase search (no semantic component)
-            results = chroma_collection.get(
-                limit=limit,
-                where=where_clause,
-                where_document=where_document,
-                include=['documents', 'metadatas']
-            )
-            # Restructure to match query() format
-            if results['documents']:
-                results = {
-                    'documents': [results['documents']],
-                    'metadatas': [results['metadatas']],
-                    'distances': [[0.5] * len(results['documents'])]  # Default distance
-                }
-            else:
-                results = {'documents': [[]], 'metadatas': [[]], 'distances': [[]]}
-        else:
-            # No query at all
-            return "Please provide a search query."
-
-    # Format the results
-    formatted_results = []
-    if results["documents"] and results["documents"][0]:
-        for i, doc in enumerate(results["documents"][0]):
-            metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-            distance = results["distances"][0][i] if results["distances"] else None
-
-            # Create preview and highlight matched phrases
-            preview = doc[:PREVIEW_LENGTH]
-            if len(doc) > PREVIEW_LENGTH:
-                preview += '...'
-
-            # Bold the required phrases in preview
-            for phrase in parsed['required_phrases']:
-                pattern = re.compile(re.escape(phrase), re.IGNORECASE)
-                preview = pattern.sub(lambda m: f"**{m.group()}**", preview)
-
-            # Get full path
-            full_path = get_full_path_from_metadata(metadata)
-
-            result_text = (
-                f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
-                f"Path: {full_path}\n"
-                f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
-                f"Score: {1 - distance if distance else 'N/A'}\n\n"
-                f"{preview}"
-            )
-            formatted_results.append(result_text)
-
-    if not formatted_results:
-        if parsed['required_phrases']:
-            return f"No results found containing: {', '.join(['\"' + p + '\"' for p in parsed['required_phrases']])}"
-        return "No results found for your query."
-
-    # Return results as a single formatted string
-    return "\n\n---\n\n".join(formatted_results) if formatted_results else "No results found."
-
-
-@mcp.tool
-async def temporal_search(
-    since_date: Optional[str] = None,
-    until_date: Optional[str] = None,
-    query: Optional[str] = None,
-    vault_filter: Optional[str] = None,
-    limit: int = DEFAULT_SEARCH_LIMIT
-) -> str:
-    """
-    Search Obsidian vault notes based on modification dates with optional semantic and exact phrase search.
-
-    Query syntax (when query is provided):
-    - "exact phrase" - Must contain this exact phrase (case-sensitive)
-    - -"excluded phrase" - Must not contain this phrase
-    - Regular text - Semantic similarity search
-
-    Args:
-        since_date: Start date in YYYY-MM-DD format (inclusive)
-        until_date: End date in YYYY-MM-DD format (inclusive)
-        query: Optional search query with quoted phrases
-        vault_filter: Optional filter results to a specific vault name
-        limit: Maximum number of results to return (default: 10, max: 20)
-
-    Examples:
-        - Find recently modified notes: since_date="2024-01-01"
-        - Find notes from a specific period: since_date="2024-01-01", until_date="2024-01-31"
-        - Find notes about "LSM trees" modified this month: query='"LSM trees"', since_date="2024-01-01"
-        - Recent meeting notes excluding cancelled: query='meeting -"cancelled"', since_date="2024-01-01"
-    """
-    global chroma_collection
-
-    # Cap limit at max
-    limit = min(limit, MAX_SEARCH_LIMIT)
-
-    # Parse the query if provided
-    parsed = None
-    if query:
-        parsed = parse_contains_query(query)
-
-    # Parse dates and convert to timestamps
+    # Parse dates and convert to timestamps if provided
     since_timestamp = None
     until_timestamp = None
 
@@ -1030,10 +909,10 @@ async def temporal_search(
         if not chroma_collection:
             return "Vector store not initialized. Please restart the server."
 
-        # Build where clause
+        # Build where clause for metadata filtering
         where_conditions = []
 
-        # Add date range filters
+        # Add date range filters if provided
         if since_timestamp and until_timestamp:
             where_conditions.append({'modified': {'$gte': since_timestamp}})
             where_conditions.append({'modified': {'$lte': until_timestamp}})
@@ -1046,40 +925,40 @@ async def temporal_search(
         if vault_filter:
             where_conditions.append({'vault': vault_filter})
 
-        # Combine conditions
+        # Combine metadata conditions
         where_clause = None
         if len(where_conditions) > 1:
             where_clause = {'$and': where_conditions}
         elif where_conditions:
             where_clause = where_conditions[0]
 
-        # Build where_document clause if we have parsed query
+        # Build where_document clause for phrase filtering
+        doc_conditions = []
+
+        for phrase in parsed['required_phrases']:
+            doc_conditions.append({"$contains": phrase})
+
+        for phrase in parsed['excluded_phrases']:
+            doc_conditions.append({"$not_contains": phrase})
+
+        # Combine document conditions
         where_document = None
-        if parsed:
-            doc_conditions = []
+        if len(doc_conditions) > 1:
+            where_document = {"$and": doc_conditions}
+        elif doc_conditions:
+            where_document = doc_conditions[0]
 
-            for phrase in parsed['required_phrases']:
-                doc_conditions.append({"$contains": phrase})
-
-            for phrase in parsed['excluded_phrases']:
-                doc_conditions.append({"$not_contains": phrase})
-
-            if len(doc_conditions) > 1:
-                where_document = {"$and": doc_conditions}
-            elif doc_conditions:
-                where_document = doc_conditions[0]
-
-        # Execute query under lock protection
-        if parsed and parsed['semantic_query']:
-            # Semantic search within date range with phrase filters
+        # Execute search based on what we have
+        if parsed['semantic_query']:
+            # Semantic search with optional phrase and temporal filters
             results = chroma_collection.query(
                 query_texts=[parsed['semantic_query']],
                 n_results=limit,
                 where=where_clause,
                 where_document=where_document
             )
-        elif where_document:
-            # Pure phrase search within date range
+        elif where_document or where_clause:
+            # Pure phrase/temporal search (no semantic component)
             results = chroma_collection.get(
                 limit=limit,
                 where=where_clause,
@@ -1096,107 +975,108 @@ async def temporal_search(
             else:
                 results = {'documents': [[]], 'metadatas': [[]], 'distances': [[]]}
         else:
-            # Get all documents in date range (no semantic or phrase search)
-            results = chroma_collection.get(
-                limit=limit,
-                where=where_clause,
-                include=['documents', 'metadatas']
-            )
-            # Restructure to match query() format
-            if results['documents']:
-                results = {
-                    'documents': [results['documents']],
-                    'metadatas': [results['metadatas']],
-                    'distances': [[None] * len(results['documents'])]  # No distances for get()
-                }
-            else:
-                results = {'documents': [[]], 'metadatas': [[]], 'distances': [[]]}
+            # No query at all
+            return "Please provide a search query."
 
-    # Format the results with enhanced date information
+    # Format the results with enhanced date information if dates were used
     formatted_results = []
     now = datetime.now()
+    has_temporal_filter = since_date or until_date
 
     if results["documents"] and results["documents"][0]:
-        # Sort by modification time (most recent first)
-        docs_with_metadata = []
-        for i, doc in enumerate(results["documents"][0]):
-            metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-            distance = results["distances"][0][i] if results["distances"] and results["distances"][0] else None
-            docs_with_metadata.append((doc, metadata, distance))
+        # If temporal filter, sort by modification time
+        if has_temporal_filter:
+            docs_with_metadata = []
+            for i, doc in enumerate(results["documents"][0]):
+                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+                distance = results["distances"][0][i] if results["distances"] else None
+                docs_with_metadata.append((doc, metadata, distance))
 
-        # Sort by modified timestamp (most recent first)
-        docs_with_metadata.sort(key=lambda x: x[1].get('modified', 0), reverse=True)
+            # Sort by modified timestamp (most recent first)
+            docs_with_metadata.sort(key=lambda x: x[1].get('modified', 0), reverse=True)
 
-        for doc, metadata, distance in docs_with_metadata:
-            # Format modification date
-            modified_timestamp = metadata.get('modified', 0)
-            if modified_timestamp:
-                modified_dt = datetime.fromtimestamp(modified_timestamp)
-                modified_str = modified_dt.strftime("%Y-%m-%d %H:%M")
-
-                # Calculate relative time
-                time_diff = now - modified_dt
-                if time_diff.days == 0:
-                    if time_diff.seconds < 3600:
-                        relative_time = f"{time_diff.seconds // 60} minutes ago"
-                    else:
-                        relative_time = f"{time_diff.seconds // 3600} hours ago"
-                elif time_diff.days == 1:
-                    relative_time = "Yesterday"
-                elif time_diff.days < 7:
-                    relative_time = f"{time_diff.days} days ago"
-                elif time_diff.days < 30:
-                    relative_time = f"{time_diff.days // 7} weeks ago"
-                else:
-                    relative_time = f"{time_diff.days // 30} months ago"
-            else:
-                modified_str = "Unknown"
-                relative_time = ""
-
-            # Create preview and highlight matched phrases
-            preview = doc[:PREVIEW_LENGTH]
-            if len(doc) > PREVIEW_LENGTH:
-                preview += '...'
-
-            # Bold the required phrases in preview if we have parsed query
-            if parsed and parsed['required_phrases']:
-                for phrase in parsed['required_phrases']:
-                    pattern = re.compile(re.escape(phrase), re.IGNORECASE)
-                    preview = pattern.sub(lambda m: f"**{m.group()}**", preview)
-
-            # Get full path
-            full_path = get_full_path_from_metadata(metadata)
-
-            result_text = (
-                f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
-                f"Path: {full_path}\n"
-                f"Modified: {modified_str} ({relative_time})\n"
-                f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
-            )
-
-            if distance is not None:
-                result_text += f"Score: {1 - distance}\n"
-
-            result_text += f"\n{preview}"
-            formatted_results.append(result_text)
+            for doc, metadata, distance in docs_with_metadata:
+                formatted_results.append(_format_search_result(doc, metadata, distance, parsed, show_date=True))
+        else:
+            # Regular semantic search ordering
+            for i, doc in enumerate(results["documents"][0]):
+                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+                distance = results["distances"][0][i] if results["distances"] else None
+                formatted_results.append(_format_search_result(doc, metadata, distance, parsed, show_date=False))
 
     if not formatted_results:
-        date_desc = []
-        if since_date:
-            date_desc.append(f"since {since_date}")
-        if until_date:
-            date_desc.append(f"until {until_date}")
-        date_str = " and ".join(date_desc) if date_desc else ""
+        error_parts = []
+        if parsed['required_phrases']:
+            error_parts.append(f"containing: {', '.join(['\"' + p + '\"' for p in parsed['required_phrases']])}")
+        if since_date or until_date:
+            date_parts = []
+            if since_date:
+                date_parts.append(f"since {since_date}")
+            if until_date:
+                date_parts.append(f"until {until_date}")
+            error_parts.append(" and ".join(date_parts))
 
-        if parsed and parsed['required_phrases']:
-            return f"No results found containing {', '.join(['\"' + p + '\"' for p in parsed['required_phrases']])} {date_str}.".strip()
-        elif query:
-            return f"No results found for '{query}' {date_str}.".strip()
-        else:
-            return f"No documents found {date_str}.".strip() if date_str else "No documents found."
+        if error_parts:
+            return f"No results found {' '.join(error_parts)}."
+        return "No results found for your query."
 
     # Return results as a single formatted string
     return "\n\n---\n\n".join(formatted_results)
+
+
+def _format_search_result(doc: str, metadata: Dict, distance: Optional[float], parsed: Dict, show_date: bool = False) -> str:
+    """Helper function to format a single search result"""
+    # Create preview and highlight matched phrases
+    preview = doc[:PREVIEW_LENGTH]
+    if len(doc) > PREVIEW_LENGTH:
+        preview += '...'
+
+    # Bold the required phrases in preview
+    for phrase in parsed.get('required_phrases', []):
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        preview = pattern.sub(lambda m: f"**{m.group()}**", preview)
+
+    # Get full path
+    full_path = get_full_path_from_metadata(metadata)
+
+    # Build result text
+    result_text = f"**{metadata.get('title', 'Untitled')}** ({metadata.get('vault', 'Unknown vault')})\n"
+    result_text += f"Path: {full_path}\n"
+
+    # Add date info if requested
+    if show_date:
+        modified_timestamp = metadata.get('modified', 0)
+        if modified_timestamp:
+            modified_dt = datetime.fromtimestamp(modified_timestamp)
+            modified_str = modified_dt.strftime("%Y-%m-%d %H:%M")
+
+            # Calculate relative time
+            now = datetime.now()
+            time_diff = now - modified_dt
+            if time_diff.days == 0:
+                if time_diff.seconds < 3600:
+                    relative_time = f"{time_diff.seconds // 60} minutes ago"
+                else:
+                    relative_time = f"{time_diff.seconds // 3600} hours ago"
+            elif time_diff.days == 1:
+                relative_time = "Yesterday"
+            elif time_diff.days < 7:
+                relative_time = f"{time_diff.days} days ago"
+            elif time_diff.days < 30:
+                relative_time = f"{time_diff.days // 7} weeks ago"
+            else:
+                relative_time = f"{time_diff.days // 30} months ago"
+
+            result_text += f"Modified: {modified_str} ({relative_time})\n"
+
+    result_text += f"Lines: {metadata.get('start_line', '?')}-{metadata.get('end_line', '?')}\n"
+
+    if distance is not None:
+        result_text += f"Score: {1 - distance if isinstance(distance, (int, float)) else 'N/A'}\n"
+
+    result_text += f"\n{preview}"
+
+    return result_text
 
 
 @mcp.tool

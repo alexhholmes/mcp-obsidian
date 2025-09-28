@@ -6,14 +6,13 @@ with Claude simple.
 
 ## Features
 
-- 🔍 **Semantic search** across your Obsidian vaults using vector embeddings
-- 📅 **Temporal search** to find notes by modification date with optional semantic filtering
+- 🔍 **Search** with semantic, exact phrase, and temporal filtering
+- 📝 **Google-style quotes** for exact phrase matching (`"exact phrase"` and `-"exclude"`)
+- 📅 **Date filtering** to find notes by modification time
 - 📁 Support for multiple vault configurations
-- 🔄 **Real-time monitoring** with automatic re-indexing after file change
-- 🔁 **Manual re-indexing** on demand via the `reindex_vaults` tool
+- 🔄 **Real-time monitoring** with automatic re-indexing
 - 🚀 Fast, incremental updates with ChromaDB backend
 - 🔒 Thread-safe operations for concurrent access
-- 🔧 Works as both MCP server and CLI tool
 
 ## Prerequisites
 
@@ -108,9 +107,8 @@ mcp-obsidian
 ```
 
 The server exposes the following tools:
-- `semantic_search`: Search across all configured vaults using semantic similarity with optional vault filtering
-- `temporal_search`: Search notes by modification date with optional semantic filtering
-- `reindex_vaults`: Manually trigger a re-index of all configured Obsidian vaults
+- `search`: Unified search with semantic, exact phrase, and temporal filtering
+- `reindex_vaults`: Manually trigger a re-index of all configured vaults
 
 The vectors are stored along with the following metadata, which can be used for
 filtering searches:
